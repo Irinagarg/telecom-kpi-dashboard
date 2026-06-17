@@ -284,11 +284,7 @@ uploaded_file = st.file_uploader("Upload Daily KPI CSV", type=["csv"])
 if uploaded_file is not None:
     if st.button("Update Master Dataset"):
         try:
-            uploaded_file.seek(0)
-            content    = uploaded_file.read().decode("utf-8", errors="ignore")
-            reader     = list(csv.reader(io.StringIO(content)))
             date_label = extract_date_from_filename(uploaded_file.name)
-
             wb = load_wb_from_state()
 
             if vendor in wb.sheetnames:
@@ -305,56 +301,125 @@ if uploaded_file is not None:
 
             is_first = existing_header is None
 
-            # Parse CSV
-            raw_header, cell_col_name, cell_idx, data_rows = parse_csv(reader)
+            # ---- Stream CSV line by line to avoid loading 90MB+ into memory ----
+            uploaded_file.seek(0)
+            text_stream = io.TextIOWrapper(
+                io.BytesIO(uploaded_file.read()), encoding="utf-8", errors="ignore"
+            )
+            csv_reader = csv.reader(text_stream)
+
+            # Pass 1: find header row and build master_header
+            # We need to scan for the header first (small cost — just scanning)
+            uploaded_file.seek(0)
+            text_stream2 = io.TextIOWrapper(
+                io.BytesIO(uploaded_file.read()), encoding="utf-8", errors="ignore"
+            )
+            preview_rows = []
+            for i, row in enumerate(csv.reader(text_stream2)):
+                preview_rows.append(row)
+                # Stop once we find the header row
+                vals = [str(c).strip() for c in row]
+                found = any(name in vals for name in CELL_COL_CANDIDATES)
+                if found:
+                    break
+
+            raw_header, cell_col_name, cell_idx, _ = parse_csv(preview_rows)
             if raw_header is None:
                 st.error(f"Could not find cell column. Tried: {CELL_COL_CANDIDATES}")
                 st.stop()
 
-            master_header, norm_rows = build_norm_rows(
-                raw_header, cell_idx, data_rows, existing_header, date_label
-            )
+            # Build master header from raw_header (no data rows yet)
+            wanted = []
+            for i, col in enumerate(raw_header):
+                if i == cell_idx: continue
+                if not col: continue
+                if col.startswith("Day:"): continue
+                wanted.append((col, i))
+            csv_lookup = {col: idx for col, idx in wanted}
 
-            if not norm_rows:
-                st.warning("No valid data rows found.")
+            if existing_header is None:
+                master_header = ["Date", "Cell Name"] + [c for c, _ in wanted]
             else:
-                if is_first:
-                    ws.append(master_header)
-                    st.info(f"📝 Header written: {len(master_header)} columns")
-                elif len(master_header) > len(existing_header):
-                    for ci, val in enumerate(master_header, start=1):
-                        ws.cell(row=1, column=ci, value=val)
-                    st.info(f"📝 Header extended to {len(master_header)} columns")
+                master_header = list(existing_header)
+                existing_set = set(master_header)
+                for col, _ in wanted:
+                    if col not in existing_set:
+                        master_header.append(col)
 
-                written = 0
-                for row in norm_rows:
-                    if str(row[0]).strip().lower() == "date": continue
-                    ws.append(row)
-                    written += 1
+            master_idx  = {col: i for i, col in enumerate(master_header)}
+            hdr_lower   = {c.lower() for c in master_header} | {c.lower() for c in CELL_COL_CANDIDATES}
 
-                # Delete stray header rows (rows 3+)
-                to_del = [
-                    i for i in range(3, ws.max_row + 1)
-                    if ws.cell(i, 1).value is not None
-                    and str(ws.cell(i, 1).value).strip().lower() == "date"
-                ]
-                for i in reversed(to_del):
-                    if i > 1: ws.delete_rows(i)
+            if is_first:
+                ws.append(master_header)
+                st.info(f"📝 Header written: {len(master_header)} columns")
+            elif len(master_header) > len(existing_header):
+                for ci, val in enumerate(master_header, start=1):
+                    ws.cell(row=1, column=ci, value=val)
+                st.info(f"📝 Header extended to {len(master_header)} columns")
 
-                rebuild_pivot(wb)
-                xlsx_bytes = save_wb_to_state(wb)
+            # Pass 2: stream through file again, write rows directly to sheet
+            uploaded_file.seek(0)
+            text_stream3 = io.TextIOWrapper(
+                io.BytesIO(uploaded_file.read()), encoding="utf-8", errors="ignore"
+            )
+            header_found = False
+            written = 0
 
-                st.success(f"✅ {vendor}: {written} rows | {len(master_header)} cols | {date_label}")
-                if to_del:
-                    st.info(f"🧹 {len(to_del)} stray header rows removed")
+            for row in csv.reader(text_stream3):
+                vals = [str(c).strip() for c in row]
 
-                # Instant download after each upload
-                st.download_button(
-                    label="⬇️ Download Updated Master Excel",
-                    data=xlsx_bytes,
-                    file_name="Telecom_Master.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                # Skip until we find and pass the header row
+                if not header_found:
+                    if any(name in vals for name in CELL_COL_CANDIDATES):
+                        header_found = True
+                    continue
+
+                # Skip blank rows
+                if not any(vals): continue
+
+                # Get cell value
+                cell_val = vals[cell_idx] if cell_idx < len(vals) else ""
+                if not cell_val: continue
+                if cell_val.lower() in SKIP_CELL_VALUES: continue
+                if cell_val.lower() in hdr_lower: continue
+                try:    float(cell_val); continue
+                except: pass
+
+                # Build output row
+                out = [""] * len(master_header)
+                out[0] = date_label
+                out[1] = cell_val
+                for col, mi in master_idx.items():
+                    if col in ("Date", "Cell Name"): continue
+                    ci2 = csv_lookup.get(col)
+                    if ci2 is not None and ci2 < len(vals):
+                        out[mi] = smart_cast(vals[ci2])
+
+                ws.append(out)
+                written += 1
+
+            # Delete stray header rows (rows 3+)
+            to_del = [
+                i for i in range(3, ws.max_row + 1)
+                if ws.cell(i, 1).value is not None
+                and str(ws.cell(i, 1).value).strip().lower() == "date"
+            ]
+            for i in reversed(to_del):
+                if i > 1: ws.delete_rows(i)
+
+            rebuild_pivot(wb)
+            xlsx_bytes = save_wb_to_state(wb)
+
+            st.success(f"✅ {vendor}: {written} rows | {len(master_header)} cols | {date_label}")
+            if to_del:
+                st.info(f"🧹 {len(to_del)} stray header rows removed")
+
+            st.download_button(
+                label="⬇️ Download Updated Master Excel",
+                data=xlsx_bytes,
+                file_name="Telecom_Master.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
         except Exception as e:
             import traceback
