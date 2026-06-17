@@ -301,83 +301,64 @@ if uploaded_file is not None:
 
             is_first = existing_header is None
 
-            # ---- Stream CSV line by line to avoid loading 90MB+ into memory ----
+            # ---- Single pass streaming — read file ONCE, never hold it all in memory ----
             uploaded_file.seek(0)
-            text_stream = io.TextIOWrapper(
-                io.BytesIO(uploaded_file.read()), encoding="utf-8", errors="ignore"
-            )
-            csv_reader = csv.reader(text_stream)
+            # Use uploaded_file directly as a binary stream
+            text_stream = io.TextIOWrapper(uploaded_file, encoding="utf-8", errors="ignore")
+            csv_iter    = csv.reader(text_stream)
 
-            # Pass 1: find header row and build master_header
-            # We need to scan for the header first (small cost — just scanning)
-            uploaded_file.seek(0)
-            text_stream2 = io.TextIOWrapper(
-                io.BytesIO(uploaded_file.read()), encoding="utf-8", errors="ignore"
-            )
-            preview_rows = []
-            for i, row in enumerate(csv.reader(text_stream2)):
-                preview_rows.append(row)
-                # Stop once we find the header row
-                vals = [str(c).strip() for c in row]
-                found = any(name in vals for name in CELL_COL_CANDIDATES)
-                if found:
-                    break
+            raw_header    = None
+            cell_idx      = None
+            master_header = None
+            csv_lookup    = {}
+            master_idx    = {}
+            hdr_lower     = set()
+            header_found  = False
+            written       = 0
 
-            raw_header, cell_col_name, cell_idx, _ = parse_csv(preview_rows)
-            if raw_header is None:
-                st.error(f"Could not find cell column. Tried: {CELL_COL_CANDIDATES}")
-                st.stop()
-
-            # Build master header from raw_header (no data rows yet)
-            wanted = []
-            for i, col in enumerate(raw_header):
-                if i == cell_idx: continue
-                if not col: continue
-                if col.startswith("Day:"): continue
-                wanted.append((col, i))
-            csv_lookup = {col: idx for col, idx in wanted}
-
-            if existing_header is None:
-                master_header = ["Date", "Cell Name"] + [c for c, _ in wanted]
-            else:
-                master_header = list(existing_header)
-                existing_set = set(master_header)
-                for col, _ in wanted:
-                    if col not in existing_set:
-                        master_header.append(col)
-
-            master_idx  = {col: i for i, col in enumerate(master_header)}
-            hdr_lower   = {c.lower() for c in master_header} | {c.lower() for c in CELL_COL_CANDIDATES}
-
-            if is_first:
-                ws.append(master_header)
-                st.info(f"📝 Header written: {len(master_header)} columns")
-            elif len(master_header) > len(existing_header):
-                for ci, val in enumerate(master_header, start=1):
-                    ws.cell(row=1, column=ci, value=val)
-                st.info(f"📝 Header extended to {len(master_header)} columns")
-
-            # Pass 2: stream through file again, write rows directly to sheet
-            uploaded_file.seek(0)
-            text_stream3 = io.TextIOWrapper(
-                io.BytesIO(uploaded_file.read()), encoding="utf-8", errors="ignore"
-            )
-            header_found = False
-            written = 0
-
-            for row in csv.reader(text_stream3):
+            for row in csv_iter:
                 vals = [str(c).strip() for c in row]
 
-                # Skip until we find and pass the header row
+                # Step 1: find the header row
                 if not header_found:
-                    if any(name in vals for name in CELL_COL_CANDIDATES):
-                        header_found = True
-                    continue
+                    for name in CELL_COL_CANDIDATES:
+                        if name in vals:
+                            raw_header   = vals
+                            cell_idx     = vals.index(name)
+                            header_found = True
+                            break
+                    if not header_found:
+                        continue
 
-                # Skip blank rows
+                    # Build master header immediately from the header row
+                    wanted = [
+                        (col, i) for i, col in enumerate(raw_header)
+                        if i != cell_idx and col and not col.startswith("Day:")
+                    ]
+                    csv_lookup = {col: i for col, i in wanted}
+
+                    if existing_header is None:
+                        master_header = ["Date", "Cell Name"] + [c for c, _ in wanted]
+                    else:
+                        master_header = list(existing_header)
+                        existing_set  = set(master_header)
+                        for col, _ in wanted:
+                            if col not in existing_set:
+                                master_header.append(col)
+
+                    master_idx = {col: i for i, col in enumerate(master_header)}
+                    hdr_lower  = ({c.lower() for c in master_header} |
+                                  {c.lower() for c in CELL_COL_CANDIDATES})
+
+                    if is_first:
+                        ws.append(master_header)
+                    elif len(master_header) > len(existing_header or []):
+                        for ci, val in enumerate(master_header, start=1):
+                            ws.cell(row=1, column=ci, value=val)
+                    continue   # header row itself is not a data row
+
+                # Step 2: process data rows
                 if not any(vals): continue
-
-                # Get cell value
                 cell_val = vals[cell_idx] if cell_idx < len(vals) else ""
                 if not cell_val: continue
                 if cell_val.lower() in SKIP_CELL_VALUES: continue
@@ -385,7 +366,6 @@ if uploaded_file is not None:
                 try:    float(cell_val); continue
                 except: pass
 
-                # Build output row
                 out = [""] * len(master_header)
                 out[0] = date_label
                 out[1] = cell_val
@@ -394,9 +374,17 @@ if uploaded_file is not None:
                     ci2 = csv_lookup.get(col)
                     if ci2 is not None and ci2 < len(vals):
                         out[mi] = smart_cast(vals[ci2])
-
                 ws.append(out)
                 written += 1
+
+            if raw_header is None:
+                st.error(f"Could not find cell column. Tried: {CELL_COL_CANDIDATES}")
+                st.stop()
+
+            if is_first:
+                st.info(f"📝 Header written: {len(master_header)} columns")
+            elif master_header and existing_header and len(master_header) > len(existing_header):
+                st.info(f"📝 Header extended to {len(master_header)} columns")
 
             # Delete stray header rows (rows 3+)
             to_del = [
