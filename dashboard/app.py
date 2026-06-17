@@ -361,6 +361,58 @@ if uploaded_file is not None:
             st.error(str(e)); st.code(traceback.format_exc())
 
 # ----------------------------------------
+# Delete a date's data
+# ----------------------------------------
+st.divider()
+if st.session_state.wb_bytes:
+    with st.expander("🗑️ Delete incorrect data"):
+        wb_del = load_wb_from_state()
+        available_sheets = [s for s in ["Nokia", "Ericsson", "Samsung", "Huawei"]
+                            if s in wb_del.sheetnames]
+        if available_sheets:
+            del_vendor = st.selectbox("Select vendor sheet", available_sheets, key="del_vendor")
+            ws_del = wb_del[del_vendor]
+
+            # Collect all unique dates from that sheet
+            all_rows_del = [[str(c).strip() if c is not None else ""
+                             for c in row] for row in ws_del.iter_rows(values_only=True)]
+            # Find header
+            date_col_idx = 0
+            for row in all_rows_del:
+                if "Date" in row:
+                    date_col_idx = row.index("Date")
+                    break
+            unique_dates = sorted(set(
+                row[date_col_idx] for row in all_rows_del[1:]
+                if row and row[date_col_idx] and row[date_col_idx].lower() != "date"
+            ))
+
+            if unique_dates:
+                del_date = st.selectbox("Select date to delete", unique_dates, key="del_date")
+                if st.button("🗑️ Delete this date's rows", type="primary"):
+                    # Delete all rows where col[date_col_idx] == del_date (reverse order)
+                    to_del = [
+                        i for i in range(2, ws_del.max_row + 1)
+                        if str(ws_del.cell(i, date_col_idx + 1).value).strip() == del_date
+                    ]
+                    for i in reversed(to_del):
+                        ws_del.delete_rows(i)
+                    rebuild_pivot(wb_del)
+                    xlsx_bytes = save_wb_to_state(wb_del)
+                    st.success(f"✅ Deleted {len(to_del)} rows for {del_date} from {del_vendor}")
+                    st.download_button(
+                        label="⬇️ Download Updated Master Excel",
+                        data=xlsx_bytes,
+                        file_name="Telecom_Master.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_delete"
+                    )
+            else:
+                st.info("No dates found in this sheet.")
+        else:
+            st.info("No vendor sheets found. Upload a CSV first.")
+
+# ----------------------------------------
 # Refresh Pivot
 # ----------------------------------------
 st.divider()
