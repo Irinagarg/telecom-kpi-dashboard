@@ -398,7 +398,7 @@ if file_ready:
             master_header = None
             csv_lookup    = {}
             master_idx    = {}
-            hdr_lower     = set()
+            hdr_lower     = {}
             header_found  = False
             written       = 0
 
@@ -598,13 +598,25 @@ if st.session_state.wb_bytes:
                 if any(c is not None for c in r)
             ]
             import pandas as pd
-            df = pd.DataFrame(display[1:], columns=display[0])
+            
+            # De-duplicate column names to support PyArrow engine formatting requirements
+            seen_cols = {}
+            unique_vendor_headers = []
+            for col_name in display[0]:
+                if col_name in seen_cols:
+                    seen_cols[col_name] += 1
+                    unique_vendor_headers.append(f"{col_name}_{seen_cols[col_name]}")
+                else:
+                    seen_cols[col_name] = 0
+                    unique_vendor_headers.append(col_name)
+
+            df = pd.DataFrame(display[1:], columns=unique_vendor_headers)
             df = df.astype(str).replace("None", "")
-            st.dataframe(df, width='stretch')
+            st.dataframe(df, use_container_width=True)
         else:
             import pandas as pd
             df = pd.DataFrame([[str(c) if c is not None else "" for c in r] for r in all_rows])
-            st.dataframe(df, width='stretch')
+            st.dataframe(df, use_container_width=True)
         col1, col2 = st.columns(2)
         col1.metric("Rows", ws.max_row)
         col2.metric("Columns", ws.max_column)
@@ -622,8 +634,20 @@ if st.session_state.wb_bytes:
         import pandas as pd
         pivot_rows = list(wb[PIVOT_SHEET].values)
         if pivot_rows:
+            # De-duplicate Pivot column names safely
+            seen_pivot_cols = {}
+            unique_pivot_headers = []
+            for c in pivot_rows[0]:
+                c_str = str(c) if c is not None else ""
+                if c_str in seen_pivot_cols:
+                    seen_pivot_cols[c_str] += 1
+                    unique_pivot_headers.append(f"{c_str}_{seen_pivot_cols[c_str]}")
+                else:
+                    seen_pivot_cols[c_str] = 0
+                    unique_pivot_headers.append(c_str)
+
             pdf = pd.DataFrame(
                 [[str(c) if c is not None else "" for c in r] for r in pivot_rows[1:]],
-                columns=[str(c) if c is not None else "" for c in pivot_rows[0]]
+                columns=unique_pivot_headers
             )
-            st.dataframe(pdf, width='stretch')
+            st.dataframe(pdf, use_container_width=True)
