@@ -278,21 +278,68 @@ st.divider()
 # ----------------------------------------
 # Vendor + CSV upload
 # ----------------------------------------
-vendor        = st.selectbox("Select Vendor", ["Nokia", "Ericsson", "Samsung", "Huawei"])
-uploaded_file = st.file_uploader("Upload Daily KPI CSV", type=["csv"])
+vendor = st.selectbox("Select Vendor", ["Nokia", "Ericsson", "Samsung", "Huawei"])
 
-if uploaded_file is not None:
+input_method = st.radio(
+    "How do you want to provide the CSV?",
+    ["Upload CSV file", "Upload ZIP (recommended for large files)", "Local file path (run app locally)"],
+    horizontal=True
+)
+
+uploaded_file = None
+uploaded_zip  = None
+local_path    = None
+
+if input_method == "Upload CSV file":
+    uploaded_file = st.file_uploader("Upload Daily KPI CSV", type=["csv"])
+elif input_method == "Upload ZIP (recommended for large files)":
+    st.caption("Zip your CSV first — typically 70-80% smaller, much faster & more reliable upload.")
+    uploaded_zip = st.file_uploader("Upload Zipped CSV", type=["zip"])
+else:
+    local_path = st.text_input(
+        "Paste full file path",
+        placeholder="C:/Users/irina/OneDrive/Documents/NOKIA_KPI_AUTOMATION/input/file.csv"
+    )
+    if local_path and not os.path.exists(local_path):
+        st.error("File not found. Check the path.")
+        local_path = None
+
+file_ready = (uploaded_file is not None or uploaded_zip is not None
+              or (local_path and os.path.exists(local_path)))
+
+if file_ready:
     if st.button("Update Master Dataset"):
         try:
-            date_label = extract_date_from_filename(uploaded_file.name)
-            wb = load_wb_from_state()
+            import zipfile
+
+            # Determine filename + get a text stream ready for csv.reader
+            if uploaded_zip is not None:
+                uploaded_zip.seek(0)
+                zf = zipfile.ZipFile(io.BytesIO(uploaded_zip.read()))
+                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                if not csv_names:
+                    st.error("No CSV file found inside the zip.")
+                    st.stop()
+                inner_name  = csv_names[0]
+                fname       = inner_name
+                raw_bytes   = zf.read(inner_name)
+                text_stream = io.TextIOWrapper(io.BytesIO(raw_bytes), encoding="utf-8", errors="ignore")
+            elif uploaded_file is not None:
+                fname = uploaded_file.name
+                uploaded_file.seek(0)
+                text_stream = io.TextIOWrapper(uploaded_file, encoding="utf-8", errors="ignore")
+            else:
+                fname       = os.path.basename(local_path)
+                text_stream = open(local_path, encoding="utf-8", errors="ignore")
+
+            date_label = extract_date_from_filename(fname)
+            wb         = load_wb_from_state()
 
             if vendor in wb.sheetnames:
                 ws = wb[vendor]
             else:
                 ws = wb.create_sheet(title=vendor)
 
-            # Read existing master header
             existing_header = None
             if ws.max_row >= 1:
                 r1 = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
@@ -301,11 +348,7 @@ if uploaded_file is not None:
 
             is_first = existing_header is None
 
-            # ---- Single pass streaming — read file ONCE, never hold it all in memory ----
-            uploaded_file.seek(0)
-            # Use uploaded_file directly as a binary stream
-            text_stream = io.TextIOWrapper(uploaded_file, encoding="utf-8", errors="ignore")
-            csv_iter    = csv.reader(text_stream)
+            csv_iter = csv.reader(text_stream)
 
             raw_header    = None
             cell_idx      = None
@@ -394,6 +437,10 @@ if uploaded_file is not None:
             ]
             for i in reversed(to_del):
                 if i > 1: ws.delete_rows(i)
+
+            # Close local file if used
+            if local_path:
+                text_stream.close()
 
             rebuild_pivot(wb)
             xlsx_bytes = save_wb_to_state(wb)
