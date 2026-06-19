@@ -68,8 +68,10 @@ def smart_cast(v):
     return v
 
 
-def extract_date_from_filename(filename):
+def extract_date_from_filename(filename, default_month="June", default_year=2026):
     import re
+
+    # 1) Numeric date formats: 2026-06-01, 20260601, 01-06-2026, 01_06_2026
     for pat, fmt in [
         (r"(\d{4}-\d{2}-\d{2})", "%Y-%m-%d"),
         (r"(\d{8})",              "%Y%m%d"),
@@ -80,6 +82,47 @@ def extract_date_from_filename(filename):
         if m:
             try:    return datetime.strptime(m.group(1), fmt).strftime("%d %B,%Y")
             except: pass
+
+    # 2) Ordinal-word formats: "1st june", "2nd June", "23rd_june", "june11", "june 11"
+    name = filename.lower()
+
+    # Strip file extension
+    name = re.sub(r"\.(csv|xlsx|xls)$", "", name)
+
+    # Pattern: <day><suffix> <month>   e.g. "1st june", "23rd_june"
+    m = re.search(r"(\d{1,2})(st|nd|rd|th)?[\s_\-]*([a-z]+)", name)
+    if m:
+        day_str, _, month_str = m.groups()
+        try:
+            day = int(day_str)
+            # Try to match month name (partial match, e.g. "june" -> June)
+            for month_num in range(1, 13):
+                month_name = datetime(2000, month_num, 1).strftime("%B").lower()
+                if month_str.startswith(month_name[:3]):  # match first 3 letters
+                    dt = datetime(default_year, month_num, day)
+                    return dt.strftime("%d %B,%Y")
+        except (ValueError, ):
+            pass
+
+    # Pattern: <month><day>  e.g. "june11", "june 16"
+    m2 = re.search(r"([a-z]+)[\s_\-]*(\d{1,2})", name)
+    if m2:
+        month_str, day_str = m2.groups()
+        try:
+            day = int(day_str)
+            for month_num in range(1, 13):
+                month_name = datetime(2000, month_num, 1).strftime("%B").lower()
+                if month_str.startswith(month_name[:3]):
+                    dt = datetime(default_year, month_num, day)
+                    return dt.strftime("%d %B,%Y")
+        except (ValueError, ):
+            pass
+
+    # 3) Nothing matched — fall back to today, but warn the user
+    st.warning(
+        f"⚠️ Could not parse a date from filename '{filename}'. "
+        f"Using today's date as fallback — please verify this is correct!"
+    )
     return datetime.today().strftime("%d %B,%Y")
 
 
